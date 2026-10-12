@@ -1,0 +1,6 @@
+{
+  "name": "claude-usage-lcd",
+  "description": "Shows your remaining Claude usage on an Arduino 16x2 LCD.",
+  "owner": { "name": "keemal94" },
+  "plugins": [{ "name": "usage-lcd", "source": "./mod" }]
+}

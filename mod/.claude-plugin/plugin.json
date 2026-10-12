@@ -1,0 +1,6 @@
+{
+  "name": "usage-lcd",
+  "version": "0.1.0",
+  "description": "Writes your Claude usage limits (5-hour and 7-day windows) to usage-lcd.json for the Arduino LCD bridge.",
+  "author": { "name": "keemal94" }
+}
