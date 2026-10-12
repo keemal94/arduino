@@ -54,11 +54,15 @@ export const serialize = (snapshot: Snapshot): string => `${JSON.stringify(snaps
 
 const LABELS: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
 
+// As the bridge decides (PROTOCOL.md section 2): the window has reset since the reading.
+const hasReset = (resetsAt: string | undefined, nowMs: number) =>
+  resetsAt !== undefined && Date.parse(resetsAt) <= nowMs
+
 function resets(resetsAt: string | undefined, nowMs: number): string {
   if (resetsAt === undefined) return 'reset time unknown'
   const s = Math.floor((Date.parse(resetsAt) - nowMs) / 1000)
   if (Number.isNaN(s)) return `resets ${resetsAt}`
-  if (s <= 0) return `reset at ${resetsAt} (passed)`
+  if (hasReset(resetsAt, nowMs)) return `reset at ${resetsAt} (passed)`
   const d = Math.floor(s / 86400)
   const h = Math.floor((s % 86400) / 3600)
   const m = Math.floor((s % 3600) / 60)
@@ -98,7 +102,8 @@ export function report(path: string | undefined, text: string | undefined, lastE
   } else {
     lines.push(`Usage file: ${path}`, `Last written ${snapshot.writtenAt}:`)
     for (const w of snapshot.windows) {
-      const left = Math.max(0, Math.round((100 - w.percentUsed) * 10) / 10)
+      // Like the LCD: a window that has reset since the reading is all left.
+      const left = hasReset(w.resetsAt, nowMs) ? 100 : Math.max(0, Math.round((100 - w.percentUsed) * 10) / 10)
       lines.push(`  ${LABELS[w.kind] ?? w.kind}: ${left}% left, ${resets(w.resetsAt, nowMs)}`)
     }
   }

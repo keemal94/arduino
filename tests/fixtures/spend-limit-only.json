@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "writtenAt": "2026-10-12T18:25:00.000Z",
+  "source": "usage-lcd mod 0.1.0",
+  "windows": [
+    {
+      "kind": "spend_limit",
+      "percentUsed": 101.5
+    }
+  ]
+}

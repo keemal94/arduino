@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "writtenAt": "2026-10-12T18:20:00.000Z",
+  "source": "usage-lcd mod 0.1.0",
+  "windows": [
+    {
+      "kind": "five_hour",
+      "percentUsed": 100,
+      "resetsAt": "2026-10-12T19:15:00.000Z"
+    },
+    {
+      "kind": "seven_day",
+      "percentUsed": 92.3,
+      "resetsAt": "2026-10-13T06:00:00.000Z"
+    }
+  ]
+}

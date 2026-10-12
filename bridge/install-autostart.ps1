@@ -15,7 +15,11 @@ if (Get-Command py -ErrorAction SilentlyContinue) { $python = @('py', '-3') }
 elseif (Get-Command python -ErrorAction SilentlyContinue) { $python = @('python') }
 else { Fail 'Python 3 was not found. Install it from https://www.python.org/downloads/ and run this again.' }
 $pythonArgs = @($python | Select-Object -Skip 1)
-$exe = & $python[0] @pythonArgs -c 'import sys, serial; print(sys.executable)' 2>$null | Select-Object -Last 1
+# The path crosses the pipe as UTF-8 so a user folder name with non-ASCII letters survives
+# (by default Python writes the ANSI code page and Windows PowerShell reads the OEM one).
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+$exe = & $python[0] @pythonArgs -c 'import sys, serial; sys.stdout.buffer.write(sys.executable.encode())' 2>$null |
+    Select-Object -Last 1
 if ($LASTEXITCODE -ne 0 -or -not $exe) {
     & $python[0] @pythonArgs -c 'import sys' 2>$null
     if ($LASTEXITCODE -ne 0) {

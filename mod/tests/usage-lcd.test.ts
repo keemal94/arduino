@@ -16,6 +16,26 @@ const TWO_TEXT = [
   '  5h: 76.5% left, resets in 2h 56m (2026-10-12T21:00:00.000Z)',
   '  7d: 41% left, resets in 3d 14h (2026-10-16T09:00:00.000Z)',
 ]
+// What TWO is written as: byte for byte tests/fixtures/normal.json, which the bridge's
+// tests read (this runner cannot); tests/e2e checks that the two stay equal.
+const NORMAL_JSON = `{
+  "schema": 1,
+  "writtenAt": "2026-10-12T18:03:12.345Z",
+  "source": "usage-lcd mod 0.1.0",
+  "windows": [
+    {
+      "kind": "five_hour",
+      "percentUsed": 23.5,
+      "resetsAt": "2026-10-12T21:00:00.000Z"
+    },
+    {
+      "kind": "seven_day",
+      "percentUsed": 59,
+      "resetsAt": "2026-10-16T09:00:00.000Z"
+    }
+  ]
+}
+`
 
 // Off Windows the engine resolves a Windows path against the working directory
 // before a hook sees it: keep the part from the drive letter on.
@@ -146,17 +166,7 @@ describe('snapshot', () => {
     expect(world.writes).toHaveLength(1)
     const [write] = world.writes
     expect(paths(world)).toEqual([FILE])
-    const expected = {
-      schema: 1,
-      writtenAt: '2026-10-12T18:03:12.345Z',
-      source: 'usage-lcd mod 0.1.0',
-      windows: [
-        { kind: 'five_hour', percentUsed: 23.5, resetsAt: '2026-10-12T21:00:00.000Z' },
-        { kind: 'seven_day', percentUsed: 59, resetsAt: '2026-10-16T09:00:00.000Z' },
-      ],
-    }
-    expect(write?.text).toBe(`${JSON.stringify(expected, null, 2)}\n`)
-    expect(JSON.parse(write?.text ?? '')).toStrictEqual(expected)
+    expect(write?.text).toBe(NORMAL_JSON)
   })
 
   test('empty rateLimits writes nothing, before or after a reading', async ($, on) => {
@@ -299,7 +309,7 @@ describe('/usage-lcd', () => {
       [
         `Usage file: ${FILE}`,
         'Last written 2026-10-12T17:00:00.000Z:',
-        '  5h: 0% left, reset at 2026-10-12T18:00:00.000Z (passed)',
+        '  5h: 100% left, reset at 2026-10-12T18:00:00.000Z (passed)',
         '  spend_limit: 0% left, reset time unknown',
       ].join('\n'),
     )

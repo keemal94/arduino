@@ -8,6 +8,7 @@ foreach ($p in $bridges) {
 if ($bridges.Count -gt 0) {
     Wait-Process -Id $bridges.ProcessId -Timeout 5 -ErrorAction SilentlyContinue
     Write-Host 'The bridge was stopped; its COM port is free now.'
+    Write-Host 'To start it again: run install-autostart.cmd (or log off and on again).'
 } else {
     Write-Host 'The bridge was not running.'
 }

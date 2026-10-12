@@ -1,8 +1,9 @@
 import json
 import logging
+import logging.handlers
 import os
-import socket
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -88,10 +89,21 @@ def test_parse_time_offsets():
     utc = b.parse_time("2026-10-12T18:03:12Z")
     assert b.parse_time("2026-10-12T20:03:12+02:00") == utc
     assert b.parse_time("2026-10-12T13:03:12-0500") == utc
-    assert b.parse_time("2026-10-12T18:03:12") == utc
+    assert b.parse_time("2026-10-12T21:03:12+03") == utc
     assert b.parse_time("2026-10-12T18:03:12.250z") == utc + 0.25
     assert b.parse_time("2026-13-12T18:03:12Z") is None
     assert b.parse_time("") is None
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs time.tzset")
+def test_parse_time_without_offset_is_local_time(monkeypatch):
+    monkeypatch.setenv("TZ", "TST-3")  # POSIX spelling of UTC+3, needs no tz database
+    time.tzset()
+    try:
+        assert b.parse_time("2026-10-12T21:00:00") == b.parse_time("2026-10-12T18:00:00Z")
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 # --- snapshot path -----------------------------------------------------------
@@ -152,6 +164,15 @@ def test_reader_keeps_last_good_snapshot(tmp_path):
     assert b.snapshot_to_line(reader.snapshot, NOW) == "W"
 
 
+def test_normal_fixture_as_the_mod_writes_it():
+    # tests/fixtures/normal.json is byte for byte what the mod's own tests expect it to write.
+    reader = b.SnapshotReader(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                                           "tests", "fixtures", "normal.json"))
+    reader.poll()
+    assert reader.snapshot == dict(GOOD, source="usage-lcd mod 0.1.0")
+    assert b.snapshot_to_line(reader.snapshot, NOW) == GOOD_LINE
+
+
 def test_reader_stats_before_reading(tmp_path, monkeypatch):
     path = tmp_path / "usage-lcd.json"
     path.write_text(json.dumps(GOOD), encoding="utf-8")
@@ -189,7 +210,7 @@ class FakeSerial:
         self.clock, self.answer_query = clock, answer_query
         self.incoming = bytearray(stale)
         self.events = [] if hello_at is None else [(clock() + hello_at, HELLO)]
-        self.written, self.closed, self.fail = [], False, None
+        self.written, self.closed, self.fail, self.fail_write = [], False, None, None
 
     def _due(self):
         for ev in [e for e in self.events if e[0] <= self.clock()]:
@@ -213,8 +234,8 @@ class FakeSerial:
         return data
 
     def write(self, data):
-        if self.fail:
-            raise self.fail
+        if self.fail or self.fail_write:
+            raise self.fail or self.fail_write
         self.written.append(data)
         if data == b"?\n" and self.answer_query:
             self.incoming += HELLO
@@ -336,16 +357,17 @@ def test_vanished_port_logged():
     assert bridge.link is None and "COM3: cannot open" in str(bridge.reported)
 
 
-@pytest.mark.parametrize("error", [serial.SerialException("WriteFile failed"),
+@pytest.mark.parametrize("where", ["fail", "fail_write"])  # unplugged: in_waiting fails too, or only write
+@pytest.mark.parametrize("error", [serial.SerialException("ClearCommError failed (PermissionError(13, ...))"),
                                    serial.SerialTimeoutException("Write timeout"),
                                    PermissionError(13, "The device does not recognize the command")])
-def test_write_failure_reconnects(error, caplog):
+def test_link_failure_reconnects(where, error, caplog):
     clock = Clock()
     first, second = FakeSerial(clock, hello_at=1.0), FakeSerial(clock, hello_at=1.0)
     bridge, opened = make_bridge(clock, {"COM3": [first, second]})
     bridge.step()
     assert bridge.link is first
-    first.fail = error
+    setattr(first, where, error)
     clock.advance(10)
     bridge.step()
     assert bridge.link is None and first.closed and "connection lost" in caplog.text
@@ -355,6 +377,20 @@ def test_write_failure_reconnects(error, caplog):
     clock.advance(1)
     bridge.step()
     assert bridge.link is second and lines(second) == [GOOD_LINE + "\n"]
+
+
+def test_probe_closes_the_port_on_any_error():
+    clock = Clock()
+    fake = FakeSerial(clock, hello_at=1.0)
+
+    def broken_read(n=1):
+        raise ValueError("driver returned junk")
+
+    fake.read = broken_read
+    bridge, _ = make_bridge(clock, {"COM3": [fake]})
+    with pytest.raises(ValueError):  # run() logs it and retries
+        bridge.step()
+    assert fake.closed and bridge.link is None
 
 
 def test_send_on_change_and_10s_heartbeat():
@@ -436,6 +472,13 @@ def test_port_order():
     assert b.ordered_ports(infos, preferred="COM9")[0] == "COM9"
 
 
+def test_port_order_skips_bluetooth():
+    infos = [SimpleNamespace(device="COM3", vid=None, hwid="BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0002\\7&1"),
+             SimpleNamespace(device="COM4", vid=None, hwid="ACPI\\PNP0501\\1"),
+             SimpleNamespace(device="COM5", vid=0x1A86, hwid="USB VID:PID=1A86:7523 SER= LOCATION=1-2")]
+    assert b.ordered_ports(infos) == ["COM5", "COM4"]
+
+
 def test_line_buffer():
     buf = b.LineBuffer()
     assert buf.feed(b"R|usage-") == []
@@ -445,20 +488,74 @@ def test_line_buffer():
     assert buf.feed(b"x" * 300) == [] and buf.buf == b""
 
 
+@pytest.fixture
+def own_handlers():
+    """Removes the handlers main()/setup_logging() add to the module logger."""
+    before = set(b.log.handlers)
+    yield
+    for h in set(b.log.handlers) - before:
+        b.log.removeHandler(h)
+        h.close()
+
+
 def test_single_instance_lock():
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-    first = b.acquire_lock(port)
-    assert first is not None
+    first = b.acquire_lock(0)
+    port = first.getsockname()[1]
     try:
-        assert b.acquire_lock(port) is None
+        with pytest.raises(OSError):
+            b.acquire_lock(port)
     finally:
         first.close()
+    b.acquire_lock(port).close()  # free again once the first one is gone
+
+
+def test_lock_socket_is_exclusive_on_windows(monkeypatch):
+    calls = []
+
+    class FakeSocket:
+        def __init__(self, *args):
+            pass
+
+        def setsockopt(self, level, option, value):
+            calls.append(option)
+
+        def bind(self, address):
+            calls.append(address)
+
+    monkeypatch.setattr(b.socket, "SO_EXCLUSIVEADDRUSE", -5, raising=False)  # its value on Windows
+    monkeypatch.setattr(b.socket, "socket", FakeSocket)
+    b.acquire_lock(47631)
+    assert calls == [-5, ("127.0.0.1", 47631)]  # and never SO_REUSEADDR
+
+
+def test_second_bridge_exits_3(tmp_path, monkeypatch, caplog, own_handlers):
+    first = b.acquire_lock(0)
+    monkeypatch.setenv("USAGE_LCD_LOCK_PORT", str(first.getsockname()[1]))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    try:
+        assert b.main(["--file", str(tmp_path / "usage-lcd.json")]) == 3
+    finally:
+        first.close()
+    assert "another bridge is already running" in caplog.text
+
+
+def test_no_console_like_pythonw(tmp_path, monkeypatch, own_handlers):
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    path = tmp_path / "Some Name" / "usage-lcd" / "bridge.log"
+    b.setup_logging(False, str(path))
+    b.log.info("logged without a console")
+    b.StdoutLink().write(b"W\n")
+    assert [type(h) for h in set(b.log.handlers)] == [logging.handlers.RotatingFileHandler]
+    assert "logged without a console" in path.read_text(encoding="utf-8")
 
 
 def test_version(capsys):
     with pytest.raises(SystemExit) as exit_info:
         b.main(["--version"])
     assert exit_info.value.code == 0 and b.VERSION in capsys.readouterr().out
+
+
+def test_far_reset_is_capped():
+    win = {"kind": "five_hour", "percentUsed": 10, "resetsAt": "9999-01-01T00:00:00Z"}
+    assert b.window_values(win, 0) == (900, b.R_MAX)

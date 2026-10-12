@@ -1,0 +1,2 @@
+# The fixtures are byte for byte what the mod writes (LF), also on a Windows checkout.
+tests/fixtures/*.json text eol=lf

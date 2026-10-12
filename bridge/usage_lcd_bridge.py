@@ -35,6 +35,7 @@ RETRY_S = 5.0
 HELLO_WAIT_S = 4.0
 QUERY_WAIT_S = 1.5
 LOCK_PORT = 47631
+R_MAX = 2147483647  # the firmware rejects larger seconds-to-reset
 HINTS = {"E|no-lcd": " (no LCD answered on I2C: check SDA/SCL wiring and LCD power)"}
 
 log = logging.getLogger("usage_lcd_bridge")
@@ -88,23 +89,24 @@ class SnapshotReader:
 
 # --- Snapshot -> serial line ---------------------------------------------
 
-_ISO = re.compile(r"(\d{4})-(\d\d)-(\d\d)[Tt ](\d\d):(\d\d)(?::(\d\d)(?:[.,](\d+))?)?\s*([Zz]|[+-]\d\d:?\d\d)?$")
+_ISO = re.compile(r"(\d{4})-(\d\d)-(\d\d)[Tt ](\d\d):(\d\d)(?::(\d\d)(?:[.,](\d+))?)?\s*([Zz]|[+-]\d\d(?::?\d\d)?)?$")
 
 
 def parse_time(text):
-    """ISO 8601 timestamp -> epoch seconds, or None. No offset means UTC."""
+    """ISO 8601 timestamp -> epoch seconds, or None. No offset means local time (ISO 8601, JS Date.parse)."""
     m = _ISO.match(text.strip()) if isinstance(text, str) else None
     if not m:
         return None
     y, mo, d, h, mi, s, frac, tz = m.groups()
     try:
-        t = datetime(int(y), int(mo), int(d), int(h), int(mi), int(s or 0), tzinfo=timezone.utc).timestamp()
-    except ValueError:
+        t = datetime(int(y), int(mo), int(d), int(h), int(mi), int(s or 0),
+                     tzinfo=timezone.utc if tz else None).timestamp()
+    except (ValueError, OverflowError, OSError):  # local times before 1970 fail on Windows
         return None
     if frac:
         t += float("0." + frac)
     if tz and tz.upper() != "Z":
-        offset = int(tz[1:3]) * 3600 + int(tz[-2:]) * 60
+        offset = int(tz[1:3]) * 3600 + (int(tz[-2:]) * 60 if len(tz) > 3 else 0)
         t += offset if tz[0] == "-" else -offset
     return t
 
@@ -129,7 +131,7 @@ def window_values(win, now):
         return 1000, -1
     tenths = (100 - Decimal(repr(win["percentUsed"]))) * 10  # Decimal: .05 ties round exactly
     left = int((tenths + Decimal("0.5")).to_integral_value(rounding=ROUND_FLOOR))  # round half up
-    r = -1 if resets is None else max(0, math.floor(resets - now))
+    r = -1 if resets is None else min(R_MAX, max(0, math.floor(resets - now)))
     return max(0, min(1000, left)), r
 
 
@@ -163,9 +165,15 @@ def port_rank(p, preferred=None):
     return (p.device != preferred, KNOWN_VIDS.index(vid) if vid in KNOWN_VIDS else len(KNOWN_VIDS))
 
 
+def is_bluetooth(p):
+    """Windows' serial-over-Bluetooth links: opening one can block for seconds."""
+    return (getattr(p, "hwid", None) or "").upper().startswith("BTHENUM")
+
+
 def ordered_ports(ports, preferred=None):
-    """Device names: the last good port, then known vendor ids in order, then the rest."""
-    return [p.device for p in sorted(ports, key=lambda p: port_rank(p, preferred))]
+    """Device names: the last good port, then known vendor ids in order, then the rest.
+    Bluetooth links are never probed."""
+    return [p.device for p in sorted(ports, key=lambda p: port_rank(p, preferred)) if not is_bluetooth(p)]
 
 
 def _close(ser):
@@ -280,19 +288,22 @@ class Bridge:
             else:
                 self._report("%s: cannot open (%s)" % (name, e))
             return None
+        found = False
         try:
             ser.reset_input_buffer()  # drop stale bytes; the board is still booting
             self.rx = LineBuffer()
-            if self._await_hello(ser, HELLO_WAIT_S):
-                return ser
-            ser.write(b"?\n")
-            if self._await_hello(ser, QUERY_WAIT_S):
-                return ser
-            self._report("%s: no answer from the usage_lcd sketch (is it uploaded?)" % name)
+            found = self._await_hello(ser, HELLO_WAIT_S)
+            if not found:
+                ser.write(b"?\n")
+                found = self._await_hello(ser, QUERY_WAIT_S)
+            if not found:
+                self._report("%s: no answer from the usage_lcd sketch (is it uploaded?)" % name)
         except OSError as e:
             self._report("%s: %s" % (name, e))
-        _close(ser)
-        return None
+        finally:
+            if not found:  # whatever went wrong, never keep the port (Windows opens it exclusively)
+                _close(ser)
+        return ser if found else None
 
     def _await_hello(self, ser, seconds):
         end = self.monotonic() + seconds
@@ -325,15 +336,16 @@ class Bridge:
 # --- Process plumbing ---------------------------------------------------------
 
 def acquire_lock(port):
-    """Single instance: hold 127.0.0.1:<port>. Returns the socket, or None if taken."""
+    """Single instance: binds 127.0.0.1:<port> and returns the socket; raises OSError if it is taken.
+    Never SO_REUSEADDR: on Windows that would let a second bridge bind the same port."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: forbid sharing the port
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
     try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: forbid sharing the port
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         s.bind(("127.0.0.1", port))
     except OSError:
         s.close()
-        return None
+        raise
     return s
 
 
@@ -402,10 +414,12 @@ def main(argv=None):
             log.error(pip_hint())
             return 1
         lock_port = int(os.environ.get("USAGE_LCD_LOCK_PORT") or LOCK_PORT)
-        lock = acquire_lock(lock_port)
-        if lock is None:
-            log.info("another bridge is already running (it holds 127.0.0.1:%d; stop-bridge.cmd stops it); "
-                     "exiting", lock_port)
+        try:
+            lock = acquire_lock(lock_port)
+        except OSError as e:
+            # The OS error tells "in use" apart from a port Windows reserved (e.g. for Hyper-V).
+            log.info("another bridge is already running: 127.0.0.1:%d is taken (%s). stop-bridge.cmd stops it; "
+                     "if none is running, set USAGE_LCD_LOCK_PORT to another port. Exiting.", lock_port, e)
             return 3
     log.info("usage_lcd_bridge %s reading %s", VERSION, path)
     bridge = Bridge(SnapshotReader(path), port=args.port, dry_run=args.dry_run)

@@ -24,7 +24,9 @@ Both the mod and the bridge resolve the path the same way, first match wins:
 4. `HOME` environment variable: `<HOME>/.claude/usage-lcd.json`.
 
 The bridge also accepts `--file <path>`, which overrides all of the above.
-When joining, use `\` if the base path contains a `\`, else `/`.
+A variable that is set but empty counts as unset. When joining, use `\` if
+the base path contains a `\`, else `/`, and do not double a separator the
+base already ends with.
 
 ### Contents (schema 1)
 
@@ -45,7 +47,8 @@ UTF-8 JSON, one object:
 - `windows` mirrors the engine's `SessionRateLimit[]` exactly as reported:
   `kind` is `five_hour`, `seven_day` or anything else (e.g. a gateway's
   `spend_limit`); `percentUsed` is 0–100 with at most one decimal (may exceed
-  100 on a spend limit); `resetsAt` is an ISO 8601 timestamp and may be absent.
+  100 on a spend limit); `resetsAt` is an ISO 8601 timestamp and may be absent
+  (one without a UTC offset is read as local time).
 - The mod writes the file only when it has at least one window. It never
   writes an empty `windows` list, so a session that has no reading yet can
   never wipe the numbers another session wrote.
@@ -67,12 +70,13 @@ UTF-8 JSON, one object:
 
 | Line | Meaning |
 | --- | --- |
-| `U|<l5>|<r5>|<l7>|<r7>` | Usage. `l` = percent **left** in tenths, integer 0–1000, or `-1` unknown. `r` = whole seconds until that window resets, integer ≥ 0, or `-1` unknown. `5` = the `five_hour` window, `7` = the `seven_day` window. Example: `U|765|4980|410|266400`. |
+| `U|<l5>|<r5>|<l7>|<r7>` | Usage. `l` = percent **left** in tenths, integer 0–1000, or `-1` unknown. `r` = whole seconds until that window resets, integer 0–2147483647, or `-1` unknown. `5` = the `five_hour` window, `7` = the `seven_day` window. Example: `U|765|4980|410|266400`. |
 | `W` | The bridge is running but has no usage data yet (no file, unreadable file, or neither window present). |
 | `?` | Query. The Arduino answers with its hello line. |
 
 The bridge sends the current line as soon as it changes, and again every
-10 seconds as a heartbeat.
+10 seconds as a heartbeat. Since `r` counts down, a `U` line changes, and so
+goes out, about once a second.
 
 ### Arduino → PC
 
@@ -89,8 +93,9 @@ For each of `five_hour` and `seven_day`, at time `now`:
 - `resetsAt` present and `resetsAt <= now` → the window has reset since the
   reading: `l = 1000`, `r = -1`.
 - Otherwise `l = clamp(round((100 - percentUsed) * 10), 0, 1000)` and
-  `r = max(0, floor((resetsAt - now) in seconds))`, or `r = -1` when
-  `resetsAt` is absent.
+  `r = min(2147483647, max(0, floor((resetsAt - now) in seconds)))`, or
+  `r = -1` when `resetsAt` is absent. Here and below, `round` means to the
+  nearest integer with halves rounded up.
 - Neither window present (or no usable snapshot) → send `W` instead of `U`.
 
 ### Bridge: finding the board
@@ -98,7 +103,8 @@ For each of `five_hour` and `seven_day`, at time `now`:
 - `--port COMx` uses that port only.
 - Otherwise it probes serial ports, those with a known Arduino or USB-serial
   vendor id first (`0x2341`, `0x2A03` Arduino; `0x1A86` CH340; `0x0403` FTDI;
-  `0x10C4` CP210x), then the rest. Probing a port = open it, wait up to 4 s
+  `0x10C4` CP210x), then the rest, skipping Windows' serial-over-Bluetooth
+  links (hardware id `BTHENUM…`), whose open can block. Probing a port = open it, wait up to 4 s
   for `R|usage-lcd|`, and if nothing came send `?` and wait 1.5 s more.
 - A port that is busy (another program holds it, e.g. the Arduino IDE's
   Serial Monitor or an upload) or vanishes (USB unplugged) is not fatal: the
@@ -120,7 +126,7 @@ col: 0123456789012345
 - Columns 0–1: label. Column 2: a space, or `!` when `0 < l <= 100` (10 % or
   less left).
 - Columns 3–11: a bar of 9 cells, 5 pixel columns each = 45 steps. Filled
-  steps = `round(l * 45 / 1000)`, but at least 1 when `l > 0` and at most 44
+  steps = `round(l * 45 / 1000)` (so `l = 100` gives 5), but at least 1 when `l > 0` and at most 44
   when `l < 1000`. Each cell is one of six custom characters (codes 0–5)
   showing 0–5 filled pixel columns, drawn with an outline so empty cells are
   still visible as part of the bar.
@@ -156,9 +162,11 @@ right-aligned in columns 10–15, e.g. `5h LIMIT   1h23m`.
 
 After a `U` line the Arduino counts each `r` down by itself with `millis()`
 (wrap-safe unsigned arithmetic), so the resets page stays right between
-messages. When a countdown reaches 0 the window has reset: the Arduino shows
-it as `l = 1000`, `r = -1` until the next line, which the bridge computes the
-same way.
+messages. When a countdown from `r > 0` reaches 0 the window has reset: the Arduino
+shows it as `l = 1000`, `r = -1` until the next line, which the bridge computes
+the same way. A line that arrives with `r = 0` shows `now` until the next line.
+A value the Arduino cannot parse (out of range, junk, wrong field count) is
+answered with `E|bad-line` and leaves the screen as it was.
 
 ### Status screens
 

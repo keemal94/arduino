@@ -1,0 +1,7 @@
+# Build output and caches
+build/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+# Type declarations Claude Code writes beside the mod when it loads it from this folder
+mod/.claude-plugin/types/
