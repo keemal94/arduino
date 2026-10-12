@@ -66,23 +66,42 @@ function resets(resetsAt: string | undefined, nowMs: number): string {
   return `resets in ${left} (${resetsAt})`
 }
 
-// The /usage-lcd answer: where the file is and what this session last wrote.
-export function report(path: string | undefined, last: Snapshot | undefined, nowMs: number): string {
-  const lines = [
-    path === undefined
-      ? 'Usage file: none, as USAGE_LCD_FILE, CLAUDE_CONFIG_DIR, USERPROFILE and HOME are all unset.'
-      : `Usage file: ${path}`,
-  ]
-  if (last === undefined) {
+// The file's snapshot, or undefined when it holds none this mod could have written.
+export function parseSnapshot(text: string): Snapshot | undefined {
+  const isWindow = (w: any) =>
+    typeof w?.kind === 'string' &&
+    typeof w.percentUsed === 'number' &&
+    (w.resetsAt === undefined || typeof w.resetsAt === 'string')
+  try {
+    const s = JSON.parse(text)
+    return s?.schema === 1 && typeof s.writtenAt === 'string' && Array.isArray(s.windows) && s.windows.every(isWindow)
+      ? s
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The /usage-lcd answer: where the file is, what it holds (`text` undefined: unreadable) and the last failure.
+export function report(path: string | undefined, text: string | undefined, lastError: string | undefined, nowMs: number): string {
+  const lines: string[] = []
+  const snapshot = text === undefined ? undefined : parseSnapshot(text)
+  if (path === undefined) {
+    lines.push('Usage file: none, as USAGE_LCD_FILE, CLAUDE_CONFIG_DIR, USERPROFILE and HOME are all unset.')
+  } else if (text === undefined) {
     lines.push(
-      "Nothing written yet: the numbers appear after Claude's first reply in a session, and only on a Pro or Max plan.",
+      `Usage file: ${path} (missing or unreadable)`,
+      "It is written after Claude's first reply in a session, and only when Claude Code is signed in with a Claude subscription, not an API key.",
     )
+  } else if (snapshot === undefined) {
+    lines.push(`Usage file: ${path} (holds no readable snapshot)`)
   } else {
-    lines.push(`Last written ${last.writtenAt}:`)
-    for (const w of last.windows) {
+    lines.push(`Usage file: ${path}`, `Last written ${snapshot.writtenAt}:`)
+    for (const w of snapshot.windows) {
       const left = Math.max(0, Math.round((100 - w.percentUsed) * 10) / 10)
       lines.push(`  ${LABELS[w.kind] ?? w.kind}: ${left}% left, ${resets(w.resetsAt, nowMs)}`)
     }
   }
+  if (lastError !== undefined) lines.push(`Last error: ${lastError}`)
   return lines.join('\n')
 }

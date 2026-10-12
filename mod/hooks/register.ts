@@ -3,11 +3,11 @@
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
 import { buildSnapshot, report, resolvePath, serialize, toWindows } from './snapshot'
-import type { Snapshot } from './snapshot'
 
-// What this module last wrote; a reload starts over, which costs one write.
-let lastKey: string | undefined // its windows, as JSON
-let last: Snapshot | undefined
+// The path and windows this module last wrote, as JSON; a reload starts over, which costs one write.
+let lastKey: string | undefined
+// The last failure, shown by /usage-lcd until a write succeeds.
+let lastError: string | undefined
 
 async function filePath($: EngineInterface): Promise<string | undefined> {
   return resolvePath({
@@ -18,50 +18,54 @@ async function filePath($: EngineInterface): Promise<string | undefined> {
   })
 }
 
-// Never writes an empty list, nor the same windows twice in a row.
+// Never writes an empty list, nor the same windows to the same path twice in a row.
 async function publish($: EngineInterface, rateLimits: readonly SessionRateLimit[]): Promise<void> {
   if (rateLimits.length === 0) return
-  const windows = toWindows(rateLimits)
-  const key = JSON.stringify(windows)
-  if (key === lastKey) return
   const path = await filePath($)
   if (path === undefined) throw new Error('no path: USAGE_LCD_FILE, CLAUDE_CONFIG_DIR, USERPROFILE and HOME are unset')
-  const snapshot = buildSnapshot(windows, await $.clock.now())
-  await $.fs.write(path, serialize(snapshot))
+  const windows = toWindows(rateLimits)
+  const key = JSON.stringify([path, windows])
+  if (key === lastKey) return
+  await $.fs.write(path, serialize(buildSnapshot(windows, await $.clock.now())))
   lastKey = key
-  last = snapshot
+  lastError = undefined
 }
 
-// A failure here must never disturb the session: it goes to the debug log only.
-async function guarded($: EngineInterface, work: () => Promise<unknown>): Promise<void> {
+// A failure here must never disturb the session: it goes to the debug log and /usage-lcd only.
+async function guarded($: EngineInterface, what: string, work: () => Promise<unknown>): Promise<void> {
   try {
     await work()
   } catch (err) {
-    $.ui.log(`usage file not updated: ${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
+    lastError = `${what}: ${err instanceof Error ? err.message : String(err)}`
+    $.ui.log(lastError, { to: 'debug' })
   }
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await guarded($, () =>
+    await guarded($, '/usage-lcd not registered', () =>
       $.command.register({
         name: 'usage-lcd',
-        description: 'Show where the usage LCD file is and the numbers last written to it',
+        description: 'Show where the usage LCD file is and what it holds',
+        immediate: true,
       }),
     )
     const started = await next(e)
-    // A resumed session may already have a reading.
-    await guarded($, async () => publish($, (await $.session.usage()).rateLimits))
+    // The session may already hold a reading.
+    await guarded($, 'usage file not updated', async () => publish($, (await $.session.usage()).rateLimits))
     return started
   })
 
   on('session.measure', async ($, e, next) => {
     const measured = await next(e)
-    await guarded($, () => publish($, e.rateLimits))
+    await guarded($, 'usage file not updated', () => publish($, e.rateLimits))
     return measured
   })
 
-  on('command.run', { command: 'usage-lcd' }, async $ => ({
-    text: report(await filePath($), last, await $.clock.now()),
-  }))
+  // Reads the file itself, so it shows what the bridge sees, whichever session wrote it.
+  on('command.run', { command: 'usage-lcd' }, async $ => {
+    const path = await filePath($)
+    const text = path === undefined ? undefined : await $.fs.read(path).catch(() => undefined)
+    return { text: report(path, text, lastError, await $.clock.now()) }
+  })
 }
