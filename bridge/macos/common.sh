@@ -10,14 +10,16 @@ fi
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BRIDGE_DIR=$(cd "$HERE/.." && pwd)
 LABEL=io.github.keemal94.usage-lcd
-# launchd runs a copy of the bridge from here, with its own Python environment, so the project
-# folder may live anywhere (macOS keeps launchd agents out of Documents, Desktop and Downloads).
+# The menu bar app runs a copy of the bridge from here, with its own Python environment, so the
+# project folder may live anywhere (macOS keeps launchd agents out of Documents, Desktop and Downloads).
 APP_DIR="$HOME/Library/Application Support/usage-lcd"
+APP_BUNDLE="$HOME/Applications/Claude Usage LCD.app"
+APP_EXEC="$APP_BUNDLE/Contents/MacOS/usage-lcd"
 VENV="$APP_DIR/venv"
 VENV_PY="$VENV/bin/python"
 LOG_DIR="$HOME/Library/Logs/usage-lcd"
 LOG_FILE="$LOG_DIR/bridge.log"      # the bridge writes this one itself
-LAUNCHD_LOG="$LOG_DIR/launchd.log"  # what the autostart bridge prints outside its log, e.g. a crash
+LAUNCHD_LOG="$LOG_DIR/launchd.log"  # what the app prints outside its log, e.g. a crash
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 SERVICE="$DOMAIN/$LABEL"
@@ -29,14 +31,14 @@ xattr -d com.apple.quarantine "$HERE"/*.command 2>/dev/null
 finish() {
     if [ -t 0 ] && [ -t 1 ]; then
         echo
-        read -r -p "Press Return to close this window." _
+        read -r -p "Press Return to finish, then close this window." _
     fi
     exit "$1"
 }
 
 # True when $1 runs and is a Python 3.9 or newer that can make a venv.
 usable_python() {
-    "$1" -c 'import sys, venv; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1
+    "$1" -I -c 'import sys, venv; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1
 }
 
 # Sets PYTHON: USAGE_LCD_PYTHON, python.org's, Homebrew's, the one on PATH, then Apple's.
@@ -58,17 +60,18 @@ find_python() {
     return 1
 }
 
-# Makes sure $VENV_PY has pyserial. Homebrew's Python refuses pip installs outside a venv (PEP 668).
-# A venv that stopped working (e.g. Homebrew removed its Python) is made again.
+# Makes sure $VENV_PY has pyserial and PyObjC. Homebrew's Python refuses pip installs outside a
+# venv (PEP 668). A venv that stopped working (e.g. Homebrew removed its Python) is made again.
+# -I (isolated): a serial.py in the working folder (Finder's is the home folder) is not pyserial.
 ensure_venv() {
-    if ! "$VENV_PY" -c 'import serial' >/dev/null 2>&1; then
+    if ! "$VENV_PY" -I -c 'import serial' >/dev/null 2>&1; then
         if ! find_python; then
             echo "Python 3 was not found. Install it from https://www.python.org/downloads/macos/"
             echo "and run this again."
             return 1
         fi
         echo "Setting up the bridge's Python environment with $PYTHON."
-        echo "The first time this downloads pyserial, so it needs the internet."
+        echo "The first time this downloads pyserial and PyObjC, so it needs the internet."
         rm -rf "$VENV"
         if ! mkdir -p "$APP_DIR" || ! "$PYTHON" -m venv "$VENV"; then
             echo "Could not create the Python environment $VENV."
@@ -76,8 +79,8 @@ ensure_venv() {
         fi
     fi
     # Quick and offline once pyserial is there.
-    if ! "$VENV_PY" -m pip install --disable-pip-version-check --quiet -r "$BRIDGE_DIR/requirements.txt"; then
-        echo "Could not install pyserial (see above). It needs the internet the first time: try again."
+    if ! "$VENV_PY" -I -m pip install --disable-pip-version-check --quiet -r "$HERE/requirements.txt"; then
+        echo "Could not install pyserial and PyObjC (see above). It needs the internet the first time: try again."
         return 1
     fi
 }
@@ -86,8 +89,8 @@ agent_loaded() {
     launchctl print "$SERVICE" >/dev/null 2>&1
 }
 
-# Unloads the autostart bridge for this login. Its plist stays, so it starts again at the next
-# login. Returns 1 if it was not loaded.
+# Unloads the app's launchd agent for this login, which quits the app. The plist stays, so the
+# app starts again at the next login. Returns 1 if it was not loaded.
 stop_agent() {
     local i=0
     agent_loaded || return 1
@@ -100,10 +103,10 @@ stop_agent() {
     return 0
 }
 
-# The Python processes of this user that run usage_lcd_bridge.py.
+# The Python processes of this user that run the bridge or the menu bar app.
 bridge_pids() {
     local pid comm
-    for pid in $(pgrep -U "$(id -u)" -f 'usage_lcd_bridge[.]py'); do
+    for pid in $(pgrep -U "$(id -u)" -f 'usage_lcd_(bridge|menubar)[.]py'); do
         [ "$pid" = "$$" ] && continue
         comm=$(ps -o comm= -p "$pid") || continue
         case "${comm##*/}" in
@@ -112,12 +115,13 @@ bridge_pids() {
     done
 }
 
-# Stops the bridges started by hand (start-bridge.command). Returns 1 if there were none.
+# Stops the bridges started by hand (start-bridge.command, or the app opened from Finder).
+# Returns 1 if there were none.
 stop_others() {
     local pids i=0
     pids=$(bridge_pids)
     [ -n "$pids" ] || return 1
-    # SIGTERM: the bridge closes its port and logs "stopped"
+    # SIGTERM: the bridge or the app closes the port and logs "stopped"
     # shellcheck disable=SC2086  # one argument per PID
     kill $pids 2>/dev/null
     while [ -n "$(bridge_pids)" ] && [ "$i" -lt 10 ]; do
@@ -130,14 +134,13 @@ stop_others() {
     return 0
 }
 
-# Stops every bridge, the autostart one and those started by hand, and says what it did.
+# Stops every bridge, the app's and those started by hand, and says what it did. Sets STOPPED.
 stop_bridges() {
-    local stopped=
-    stop_agent && stopped=1
-    stop_others && stopped=1
-    if [ -n "$stopped" ]; then
+    STOPPED=
+    stop_agent && STOPPED=1
+    stop_others && STOPPED=1
+    if [ -n "$STOPPED" ]; then
         echo "The bridge was stopped; its serial port is free now."
-        echo "To start it again: double-click install-autostart.command (or log out and in again)."
     else
         echo "The bridge was not running."
     fi

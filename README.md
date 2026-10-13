@@ -254,19 +254,22 @@ does not offer the command.
 
 ## macOS
 
-On a Mac, the Arduino, the LCD, the wiring and the firmware are the same as on Windows.
-Only the bridge's scripts and a few file locations differ. Everything below is done in
-Finder and in apps; you do not have to type commands. You need a Mac with the Claude
-desktop app, signed in with a Claude subscription (such as **Pro or Max**).
+On a Mac, the Arduino, the LCD, the wiring and the firmware are the same as on Windows. The
+bridge runs in a small menu bar app, **Claude Usage LCD**, which also shows the 5-hour
+window's percent left at the top right of the screen. Everything below is done in Finder and
+in apps. Only two optional steps, giving the bridge a port (M5) or a file (M7), need Terminal.
+You need a Mac with the Claude desktop app, signed in with a Claude subscription (such as
+**Pro or Max**).
 
 ### M1. Get the files
 
 1. On GitHub, click **Code → Download ZIP**. Safari unpacks it in your **Downloads**
    folder; with another browser, double-click the ZIP in Finder. The folder's name starts
    with `arduino-`. Rename it to `claude-usage-lcd`.
-2. Move the folder where you keep things, for example your **Documents** folder. The
-   autostart (M5) runs its own copy of the bridge, so the folder may be anywhere. If you
-   move it later, repeat M5 and M6.
+2. Move the folder where you keep things, for example your **Documents** folder. The app
+   (M5) runs its own copy of the bridge, so the folder may be anywhere. If you move it
+   later, repeat M6. If you replace it with a newer download, double-click
+   `install-autostart.command` again (M5), so the app gets the new bridge.
 
 ### M2. Wire the LCD
 
@@ -292,9 +295,10 @@ Follow [step 3](#3-upload-the-firmware) with Arduino IDE 2 for macOS: download i
 Download the **macOS installer** of Python 3 from
 <https://www.python.org/downloads/macos/>, open it and click through it. A Python from
 Homebrew works too. You do not run any `pip` command: the bridge's scripts make a Python
-environment of their own and put pyserial in it. The first time, that needs the internet.
+environment of their own and put pyserial and PyObjC (for the menu bar) in it. The first
+time, that needs the internet.
 
-### M5. Start the bridge
+### M5. Start the bridge and the menu bar app
 
 1. In Finder, open the project folder, then `bridge`, then `macos`, and double-click
    `start-bridge.command`. A Terminal window opens.
@@ -318,36 +322,49 @@ environment of their own and put pyserial in it. The first time, that needs the 
    └────────────────┘
    ```
 
-   The numbers appear after M6. If the window says the port `is busy or access is
-   denied`, quit the Arduino IDE.
+   This means the Mac and the Arduino are talking. The numbers appear after M6. If the
+   window says the port `is busy or access is denied`, quit the Arduino IDE.
 3. Close the Terminal window (click **Terminate** if asked). Then double-click
-   `install-autostart.command`. It copies the bridge to
-   `~/Library/Application Support/usage-lcd` and runs it in the background, now and every
-   time you log in. Press Return to close its window.
+   `install-autostart.command`. It makes the app **Claude Usage LCD** in the Applications
+   folder of your home folder, starts it, and has it start every time you log in. When the
+   window says `Claude Usage LCD is running`, press Return and close the window.
 
-   macOS then shows a notification **Background Items Added** that names "python" or
-   "Python". That is the bridge. It must stay switched on in **System Settings → General →
-   Login Items & Extensions**, under **Allow in the Background**.
+   A gauge icon appears at the top right of the screen, in the menu bar, with the percent
+   left of the 5-hour window next to it (`--%` until the first usage data arrives). macOS
+   also shows a notification, **Background Items Added**. The item must stay switched on
+   in **System Settings → General → Login Items & Extensions**, under **Allow in the
+   Background**.
+
+Click the icon for its menu:
+
+- what the LCD gets: `LCD: connected on /dev/cu.usbserial-110`, then both windows, for
+  example `5h: 76% left, resets in 2h30m`;
+- **Stop LCD Bridge** stops the bridge and frees the port, for example before you upload a
+  sketch with the Arduino IDE. The icon turns grey, and the item becomes **Start LCD
+  Bridge**;
+- **Open Log** shows the bridge's log;
+- **Quit Claude Usage LCD** quits the app and the bridge. To open it again, open
+  **Claude Usage LCD** in Finder's **Go → Home → Applications**, or search for it with
+  Spotlight (Command-Space). It also starts again when you next log in.
 
 The other scripts in `bridge/macos`:
 
-- `stop-bridge.command` stops the bridge, for example before you upload a sketch.
-  Autostart stays installed: the bridge starts again when you next log in, or when you
-  double-click `install-autostart.command`.
-- `uninstall-autostart.command` removes autostart and stops the bridge.
+- `stop-bridge.command` stops every bridge, the app included. The app opens again when you
+  next log in.
+- `uninstall-autostart.command` removes the app and its autostart, and stops the bridge.
 
-The bridge writes its log to `~/Library/Logs/usage-lcd/bridge.log`. To open it, choose
-**Go → Go to Folder…** in Finder, type `~/Library/Logs/usage-lcd`, press Return and
-double-click `bridge.log`. Next to it, `launchd.log` only has something in it when the
-autostart bridge could not start at all.
+The bridge writes its log to `~/Library/Logs/usage-lcd/bridge.log` (**Open Log** in the
+menu). Next to it, `launchd.log` only has something in it when the app could not start
+at all.
 
 The bridge only opens USB serial ports, and tries `/dev/cu.usbmodem…` and
 `/dev/cu.usbserial…` first. It never opens Bluetooth ports. Do you have other USB serial
 devices, such as a 3D printer or another Arduino? Then give the bridge the port: open
 **Terminal** (in Applications → Utilities), drag `install-autostart.command` from Finder
 into its window, type a space and `--port /dev/cu.usbserial-110` (your port), and press
-Return. To see the ports, drag `start-bridge.command` into Terminal instead and add
-` --list`.
+Return. A later double-click of `install-autostart.command` keeps that port; run
+`uninstall-autostart.command` first to drop it. To see the ports, drag
+`start-bridge.command` into Terminal instead and add ` --list`.
 
 ### M6. Install the mod in the Claude desktop app
 
@@ -356,8 +373,9 @@ Return. To see the ports, drag `start-bridge.command` into Terminal instead and 
 2. In Finder, choose **Go → Go to Folder…**, type `~/.claude` and press Return. (Finder
    hides that folder otherwise.) Control-click `settings.json` and choose **Open With →
    TextEdit**. If there is no `settings.json`: open TextEdit, choose **Format → Make
-   Plain Text**, and save the new file in that folder as `settings.json`. When TextEdit
-   asks, click **Use .json**.
+   Plain Text**, then **File → Save**. In the save dialog press Shift-Command-G, type
+   `~/.claude` and press Return, type `settings.json` as the name and click **Save**.
+   When TextEdit asks, click **Use .json**.
 3. In TextEdit, first switch off **Edit → Substitutions → Smart Quotes**. Otherwise
    TextEdit turns `"` into curly quotes, and Claude cannot read the file.
 4. Set `CLAUDE_CODE_PLUGIN_DIRS` to the path you copied, in an `env` block. On a Mac a
@@ -389,10 +407,12 @@ As in [Check that it works](#check-that-it-works), with Mac paths:
 1. In a new local Code session, type `/usage-lcd`. It answers with
    `Usage file: /Users/yourname/.claude/usage-lcd.json (missing or unreadable)`.
 2. Send any message, for example `hi`, and wait for Claude's reply. Within a few seconds
-   the LCD shows the bars, and `/usage-lcd` shows what was written.
+   the LCD shows the bars, the menu bar shows the percent left, and `/usage-lcd` shows
+   what was written. The LCD and the menu bar show the percent **left**, while Claude's
+   usage page shows the percent used.
 3. If the LCD still says `waiting for data`, compare the path `/usage-lcd` shows with the
-   `reading …` line in `~/Library/Logs/usage-lcd/bridge.log`. If they differ, give the
-   bridge that file: drag `install-autostart.command` into Terminal, type a space and
+   `reading …` line in the log (**Open Log**). If they differ, give the bridge that file:
+   drag `install-autostart.command` into Terminal, type a space and
    `--file "/the/path/usage-lcd/shows.json"`, and press Return.
 
 ### macOS troubleshooting
@@ -402,17 +422,19 @@ also:
 
 | What you see | Why | What to do |
 | --- | --- | --- |
-| `Claude usage LCD` / `waiting for PC..` | The bridge is not running, or it cannot open or find the board | Double-click `start-bridge.command` and read its messages. "busy or access is denied": quit the Arduino IDE. Log: `~/Library/Logs/usage-lcd/bridge.log`. |
-| The Arduino IDE's upload fails with `Resource busy`, or cannot open the port | The bridge holds the port, so the two never use the board at once | Double-click `stop-bridge.command`, upload, then double-click `install-autostart.command`. |
+| `Claude usage LCD` / `waiting for PC..` | The bridge is not running, or it cannot open or find the board | Click the gauge icon. If its menu says `stopped`, choose **Start LCD Bridge**. If there is no icon, open **Claude Usage LCD** (M5). If it says `looking for the Arduino`, see the log (**Open Log**); "busy or access is denied": quit the Arduino IDE. |
+| The Arduino IDE's upload fails with `Resource busy`, or cannot open the port | The bridge holds the port, so the two never use the board at once | Choose **Stop LCD Bridge** in the app's menu, upload, then choose **Start LCD Bridge**. |
+| No gauge icon in the menu bar | The app is not running, or the menu bar is full | Open **Claude Usage LCD** (M5). On a MacBook with a notch, icons that do not fit hide behind it: quit some other menu bar apps. |
 | No `/dev/cu.usbserial-…` or `/dev/cu.usbmodem…` under **Tools → Port** | Charge-only cable, a USB hub or adapter, or (rarely) the driver | Try another cable, and plug it into the Mac directly. Then install WCH's CH34x driver. |
 | "cannot be opened", "Apple could not verify" or "unidentified developer" | Gatekeeper checks each downloaded script | **System Settings → Privacy & Security → Open Anyway**, as in M5. |
 | Double-clicking a `.command` file opens it in a text editor, or says you do not have permission | The tool that unpacked the ZIP dropped the files' "executable" flag | Download the ZIP again and let Safari or Finder unpack it. |
 | `Python 3 was not found` | Python is not installed | Install it as in M4, then double-click the script again. |
-| `Could not install pyserial` | The first setup needs the internet | Connect to the internet and double-click the script again. |
-| `launchd did not start the bridge`, or the bridge does not start at login | Its background item is switched off | In **System Settings → General → Login Items & Extensions → Allow in the Background**, switch on "python" (or "Python"). Then double-click `install-autostart.command`. |
-| `The bridge stopped right away` | Usually a wrong `--port` or `--file`, or a Python that Homebrew removed | Double-click `start-bridge.command` to see the messages. Double-click `install-autostart.command` again: it also makes the Python environment again. |
-| `PC link lost` / `start the bridge` after the Mac slept | Nothing reached the LCD while the Mac slept | After waking, the bridge finds the board again within seconds. If not, double-click `install-autostart.command`. |
-| `another bridge is already running` | Autostart already runs one | Nothing to do. To watch it in a window instead, double-click `stop-bridge.command` first. |
+| `Could not install pyserial and PyObjC` | The first setup needs the internet | Connect to the internet and double-click the script again. |
+| `launchd did not start the app`, or the app does not start at login | Its background item is switched off | In **System Settings → General → Login Items & Extensions → Allow in the Background**, switch it on. Then double-click `install-autostart.command`. |
+| `The app stopped right away` | Usually a mistyped option, such as `-port` for `--port` | Read the lines after `--- end of …` in the same window. Run `uninstall-autostart.command`, then `install-autostart.command` with the right options (as in M5), or double-click it for none. |
+| The app stopped working after a Python update | Homebrew removed the Python its environment was made with | Double-click `install-autostart.command`: it makes the environment again. |
+| `PC link lost` / `start the bridge` after the Mac slept | Nothing reached the LCD while the Mac slept | After waking, the bridge finds the board again within seconds. If not, choose **Stop LCD Bridge** and then **Start LCD Bridge**. |
+| `another bridge is already running` (from `start-bridge.command`) | The app already runs one | Nothing to do. To watch the bridge in a Terminal window instead, quit the app first. |
 
 ## For developers
 
@@ -434,7 +456,9 @@ every fixture through the bridge and the display code. To see a frame yourself, 
 
 On macOS, Homebrew's Python refuses `pip install` outside a virtual environment (PEP 668).
 Make one in the repository folder (`.venv` is gitignored) and run the Python suites with it:
-`python3 -m venv .venv`, `.venv/bin/python -m pip install pyserial pytest shellcheck-py`,
+`python3 -m venv .venv`, then
+`.venv/bin/python -m pip install pyserial pytest shellcheck-py pyobjc-framework-Cocoa`,
 then `.venv/bin/python -m pytest bridge/tests tests`. With shellcheck there, the bridge's
 tests also check `bridge/macos`. On a Mac they run those scripts against a throwaway home
-folder, never against the real launchd agent.
+folder, never against the real launchd agent. The menu bar app's logic
+(`bridge/macos/usage_lcd_menubar.py`) is tested without AppKit, so it runs anywhere.

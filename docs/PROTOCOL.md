@@ -113,9 +113,11 @@ For each of `five_hour` and `seven_day`, at time `now`:
   names come first, before the vendor id order: `/dev/cu.usbmodem*` (original UNO and Mega),
   `/dev/cu.usbserial*` (CH340 with Apple's driver, FTDI), `/dev/cu.wchusbserial*` (CH340 with
   WCH's driver), `/dev/cu.SLAB_USBtoUART*` (CP210x).
-- On macOS and Linux the bridge also sets `TIOCEXCL` on the open port, so another program
-  (the Arduino IDE's upload or Serial Monitor) gets "Resource busy" instead of sharing it, as
-  on Windows.
+- On macOS and Linux the bridge also sets `TIOCEXCL` on the open port, so a program that
+  opens it later (the Arduino IDE's upload or Serial Monitor) gets "Resource busy" instead of
+  sharing it. This works one way only: avrdude neither locks nor sets `TIOCEXCL`, so a bridge
+  that is still looking for its board can open the port during an upload. Stop the bridge
+  before uploading.
 - A port that is busy (another program holds it, e.g. the Arduino IDE's
   Serial Monitor or an upload) or vanishes (USB unplugged) is not fatal: the
   bridge logs it and tries again every 5 s.

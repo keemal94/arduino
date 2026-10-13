@@ -1,0 +1,4 @@
+# What the macOS scripts install into their own Python environment: the bridge's own
+# requirements, and PyObjC for the menu bar app.
+-r ../requirements.txt
+pyobjc-framework-Cocoa>=10
