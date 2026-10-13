@@ -141,6 +141,18 @@ describe('file path', () => {
     expect(resolvePath({})).toBeUndefined()
   })
 
+  test('the desktop app on macOS: HOME only, joined with a slash', async ($, on) => {
+    const macFile = '/Users/Some Name/.claude/usage-lcd.json'
+    const world = engine(on, { HOME: '/Users/Some Name' })
+    await start($)
+    await measure($, TWO)
+    expect(paths(world)).toEqual([macFile])
+    expect(world.writes[0]?.text).toBe(NORMAL_JSON)
+    expect(await usageLcd($)).toBe(
+      [`Usage file: ${macFile}`, 'Last written 2026-10-12T18:03:12.345Z:', ...TWO_TEXT].join('\n'),
+    )
+  })
+
   test('the mod reads the environment in that order, and follows a change of path', async ($, on) => {
     const world = engine(on, { ...all })
     const steps: [Partial<Record<keyof typeof all, string>>, string][] = [

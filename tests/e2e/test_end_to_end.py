@@ -109,6 +109,14 @@ ENVS = [
     {"USERPROFILE": "", "HOME": "/home/some one"},
     {},
 ]
+# Environments as macOS gives them: HOME only. The first is the desktop app's and launchd's.
+MAC_ENVS = [
+    {"HOME": "/Users/Some Name"},
+    {"HOME": "/Users/Yükselen/"},
+    {"HOME": "/Users/Some Name", "USERPROFILE": "", "CLAUDE_CONFIG_DIR": "", "USAGE_LCD_FILE": ""},
+    {"HOME": "/Users/Some Name", "CLAUDE_CONFIG_DIR": "/Users/Some Name/.claude-work/"},
+    {"HOME": "/Users/Some Name", "USAGE_LCD_FILE": "/Users/Some Name/Library/usage lcd.json"},
+]
 
 
 def test_mod_writes_where_the_bridge_reads():
@@ -118,14 +126,18 @@ def test_mod_writes_where_the_bridge_reads():
 import { resolvePath } from %s
 for (const env of JSON.parse(process.argv[1])) console.log(JSON.stringify(resolvePath(env) ?? null))
 """ % json.dumps((ROOT / "mod" / "hooks" / "snapshot.ts").as_uri())
-    run = subprocess.run(["node", "--input-type=module", "-e", script, json.dumps(ENVS)],
+    envs = ENVS + MAC_ENVS
+    run = subprocess.run(["node", "--input-type=module", "-e", script, json.dumps(envs)],
                          capture_output=True, encoding="utf-8")
     if "ERR_UNKNOWN_FILE_EXTENSION" in run.stderr:
         pytest.skip("this node cannot import TypeScript (needs 22.18 or newer)")
     assert run.returncode == 0, run.stderr
     mod = [json.loads(line) for line in run.stdout.splitlines()]
-    assert mod == [bridge.snapshot_path(env) for env in ENVS]
+    assert mod == [bridge.snapshot_path(env) for env in envs]
     assert mod[0] == "C:\\Users\\Some Name\\.claude\\usage-lcd.json"
+    mac = mod[len(ENVS):]
+    assert mac[:3] == ["/Users/Some Name/.claude/usage-lcd.json", "/Users/Yükselen/.claude/usage-lcd.json",
+                       "/Users/Some Name/.claude/usage-lcd.json"]
 
 
 # --- (a) offline chain: fixture -> bridge mapping -> display ---------------------
