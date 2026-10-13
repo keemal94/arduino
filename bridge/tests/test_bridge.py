@@ -460,6 +460,47 @@ def test_arduino_restart_resends_and_errors_logged(caplog):
     assert lines(fake) == [GOOD_LINE + "\n"] * 2
 
 
+class Stopper:
+    """A threading.Event whose wait() moves the test clock; it sets itself after `waits` waits."""
+
+    def __init__(self, clock, waits=None):
+        self.clock, self.left, self.flag = clock, waits, False
+
+    def is_set(self):
+        return self.flag
+
+    def set(self):
+        self.flag = True
+
+    def wait(self, seconds):
+        self.clock.advance(seconds)
+        if self.left is not None:
+            self.left -= 1
+            self.flag = self.flag or self.left <= 0
+        return self.flag
+
+
+def test_run_until_stopped_then_close_the_port():
+    # The macOS menu bar app runs the bridge on a thread and stops it from the menu.
+    clock = Clock()
+    fake = FakeSerial(clock, hello_at=1.0)
+    bridge, _ = make_bridge(clock, {"COM3": [fake]})
+    bridge.run(Stopper(clock, waits=3))
+    assert lines(fake) == [GOOD_LINE + "\n"] and fake.closed and bridge.link is None
+
+
+def test_stop_cuts_a_probe_short():
+    clock = Clock()
+    silent, other = FakeSerial(clock), FakeSerial(clock, hello_at=1.0)
+    bridge, opened = make_bridge(clock, {"COM3": [silent], "COM4": [other]})
+    stop = Stopper(clock)
+    read = silent.read
+    silent.read = lambda n=1: stop.set() or read(n)  # stop while it waits for the hello
+    bridge.run(stop)
+    assert clock() - 100 < 0.5 and silent.closed and lines(silent) == []  # no "?" sent
+    assert opened == ["COM3"] and bridge.link is None
+
+
 def test_dry_run_prints_lines(capsys):
     clock = Clock()
     bridge = b.Bridge(StaticReader(GOOD), dry_run=True, monotonic=clock, wall=lambda: NOW,
@@ -671,6 +712,8 @@ def test_second_bridge_exits_3(platform, stopper, tmp_path, monkeypatch, caplog,
     monkeypatch.setenv("USAGE_LCD_LOCK_PORT", str(first.getsockname()[1]))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(sys, "platform", platform)
+    # A lock that lets it through must fail here, not hang probing the real serial ports.
+    monkeypatch.setattr(b.Bridge, "run", lambda self, stop=None: pytest.fail("the lock let a second bridge run"))
     try:
         assert b.main(["--file", str(tmp_path / "usage-lcd.json")]) == 3
     finally:
@@ -678,17 +721,13 @@ def test_second_bridge_exits_3(platform, stopper, tmp_path, monkeypatch, caplog,
     assert "another bridge is already running" in caplog.text and stopper in caplog.text
 
 
-def test_no_console_log_writes_the_file_only(tmp_path, monkeypatch, own_handlers):
-    # The macOS autostart: launchd keeps the console output in a file of its own.
-    first = b.acquire_lock(0)
-    monkeypatch.setenv("USAGE_LCD_LOCK_PORT", str(first.getsockname()[1]))
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    try:
-        assert b.main(["--no-console-log", "--file", str(tmp_path / "usage-lcd.json")]) == 3
-    finally:
-        first.close()
+def test_file_only_logging(tmp_path, own_handlers):
+    # The macOS menu bar app: launchd keeps its console output in a file of its own.
+    path = tmp_path / "usage-lcd" / "bridge.log"
+    b.setup_logging(False, str(path), console=False)
+    b.log.info("logged to the file only")
     assert [type(h) for h in set(b.log.handlers)] == [logging.handlers.RotatingFileHandler]
-    assert "another bridge is already running" in (tmp_path / "usage-lcd" / "bridge.log").read_text(encoding="utf-8")
+    assert "logged to the file only" in path.read_text(encoding="utf-8")
 
 
 def test_log_file_per_system(tmp_path):

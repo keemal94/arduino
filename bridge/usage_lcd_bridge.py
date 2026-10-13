@@ -262,16 +262,24 @@ class Bridge:
         self.sent_at = 0.0
         self.next_poll = self.next_connect = monotonic()
         self.reported = set()  # problems already logged at INFO since the last connect
+        self.stop = None  # set by run()
 
-    def run(self):
-        while True:
+    def run(self, stop=None):
+        """Runs forever or, given a threading.Event, until it is set; then closes the port."""
+        self.stop = stop
+        pause = self.sleep if stop is None else stop.wait
+        while not self.stopping():
             try:
                 self.step()
             except Exception:  # never let a background bridge die
                 log.exception("unexpected error; retrying in %d s", RETRY_S)
                 self.close()
-                self.sleep(RETRY_S)
-            self.sleep(0.2)
+                pause(RETRY_S)
+            pause(0.2)
+        self.close()
+
+    def stopping(self):
+        return self.stop is not None and self.stop.is_set()
 
     def step(self):
         now = self.monotonic()
@@ -299,6 +307,8 @@ class Bridge:
         if not names:
             self._report("no serial ports found: is the Arduino plugged in?")
         for name in names:
+            if self.stopping():
+                break
             ser = self._probe(name)
             if ser is not None:
                 self.link, self.link_name, self.preferred = ser, name, name
@@ -333,10 +343,10 @@ class Bridge:
             ser.reset_input_buffer()  # drop stale bytes; the board is still booting
             self.rx = LineBuffer()
             found = self._await_hello(ser, HELLO_WAIT_S)
-            if not found:
+            if not found and not self.stopping():
                 ser.write(b"?\n")
                 found = self._await_hello(ser, QUERY_WAIT_S)
-            if not found:
+            if not found and not self.stopping():
                 self._report("%s: no answer from the usage_lcd sketch (is it uploaded?)" % name)
         except OSError as e:
             self._report("%s: %s" % (name, e))
@@ -347,7 +357,7 @@ class Bridge:
 
     def _await_hello(self, ser, seconds):
         end = self.monotonic() + seconds
-        while self.monotonic() < end:
+        while self.monotonic() < end and not self.stopping():
             if any(line.startswith(HELLO) for line in self._read(ser)):
                 return True
         return False
@@ -398,6 +408,7 @@ def log_file(env, platform=None):
 
 
 def setup_logging(verbose, path, console=True):
+    """console=False: the log file only (the macOS menu bar app, whose stderr launchd keeps apart)."""
     log.setLevel(logging.DEBUG if verbose else logging.INFO)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     handlers = [logging.StreamHandler()] if console and sys.stderr is not None else []  # pythonw has no console
@@ -437,8 +448,6 @@ def main(argv=None):
     p.add_argument("--list", action="store_true", help="list serial ports and exit")
     p.add_argument("--dry-run", action="store_true", help="print the lines instead of opening a port")
     p.add_argument("--verbose", "-v", action="store_true", help="log every line sent and received")
-    p.add_argument("--no-console-log", action="store_true",
-                   help="log to the log file only (the macOS autostart: launchd keeps the console output apart)")
     p.add_argument("--version", action="version", version="usage_lcd_bridge " + VERSION)
     args = p.parse_args(argv)
 
@@ -455,7 +464,7 @@ def main(argv=None):
             print("No serial ports found.")
         return 0
 
-    setup_logging(args.verbose, log_file(os.environ), console=not args.no_console_log)
+    setup_logging(args.verbose, log_file(os.environ))
     path = snapshot_path(os.environ, args.file)
     if not path:
         log.error("cannot tell where the snapshot file is: set USAGE_LCD_FILE or use --file")
