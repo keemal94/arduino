@@ -447,9 +447,10 @@ def main(argv=None):
             print(pip_hint())
             return 1
         ports = sorted(list_serial_ports(), key=port_rank)
+        width = max([8] + [len(port.device) for port in ports])  # macOS names are long
         for port in ports:
             ids = "%04X:%04X" % (port.vid, port.pid) if port.vid is not None else "no USB id"
-            print("%-8s %-10s %-8s %s" % (port.device, ids, VENDORS.get(port.vid, ""), port.description))
+            print("%-*s %-10s %-8s %s" % (width, port.device, ids, VENDORS.get(port.vid, ""), port.description))
         if not ports:
             print("No serial ports found.")
         return 0

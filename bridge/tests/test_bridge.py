@@ -718,6 +718,22 @@ def test_no_console_like_pythonw(tmp_path, monkeypatch, own_handlers):
     assert "logged without a console" in path.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("ports, want", [
+    ([SimpleNamespace(device="COM3", vid=0x1A86, pid=0x7523, description="USB-SERIAL CH340 (COM3)"),
+      SimpleNamespace(device="COM1", vid=None, pid=None, description="Communications Port (COM1)")],
+     ["COM3     1A86:7523  CH340    USB-SERIAL CH340 (COM3)",
+      "COM1     no USB id           Communications Port (COM1)"]),
+    ([SimpleNamespace(device="/dev/cu.Bluetooth-Incoming-Port", vid=None, pid=None, description="n/a"),
+      SimpleNamespace(device="/dev/cu.usbserial-110", vid=0x1A86, pid=0x7523, description="USB Serial")],
+     ["/dev/cu.usbserial-110           1A86:7523  CH340    USB Serial",
+      "/dev/cu.Bluetooth-Incoming-Port no USB id           n/a"]),
+])
+def test_list(ports, want, monkeypatch, capsys):
+    monkeypatch.setattr(b, "list_serial_ports", lambda: ports)
+    assert b.main(["--list"]) == 0
+    assert capsys.readouterr().out.splitlines() == want
+
+
 def test_version(capsys):
     with pytest.raises(SystemExit) as exit_info:
         b.main(["--version"])
