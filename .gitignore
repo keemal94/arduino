@@ -1,4 +1,5 @@
-# Build output and caches
+# Build output, caches and the developers' Python environment (README, For developers)
+.venv/
 build/
 __pycache__/
 .pytest_cache/
