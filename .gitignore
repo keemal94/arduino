@@ -1,5 +1,7 @@
 # Build output, caches and the developers' Python environment (README, For developers)
 .venv/
+# Finder's folder settings (macOS)
+.DS_Store
 build/
 __pycache__/
 .pytest_cache/
