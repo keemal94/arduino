@@ -274,3 +274,55 @@ def test_live_serial_chain(lcdsim, tmp_path):
             proc.kill()
             proc.wait()
         fake.close()
+
+
+# --- (c) one bridge at a time, as real processes --------------------------------
+
+def wait_for_log(log, text, count=1, seconds=10):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if log.exists() and log.read_text(encoding="utf-8").count(text) >= count:
+            return
+        time.sleep(0.05)
+    pytest.fail("%r (x%d) not logged within %d s: %r"
+                % (text, count, seconds, log.read_text(encoding="utf-8") if log.exists() else None))
+
+
+def test_only_one_bridge_runs(tmp_path):
+    # The lock is a bound TCP port on 127.0.0.1: while one bridge runs a second exits 3, and
+    # once it has stopped another can start. SIGTERM (launchctl bootout, stop-bridge.command)
+    # stops a bridge as Ctrl+C does.
+    if sys.platform == "win32":
+        pytest.skip("sends SIGTERM")
+    pytest.importorskip("serial", reason="the bridge needs pyserial")
+    env = dict(os.environ, HOME=str(tmp_path), LOCALAPPDATA=str(tmp_path), USAGE_LCD_LOCK_PORT=str(free_port()))
+    missing = tmp_path / "no-such-port"
+    cmd = [sys.executable, str(BRIDGE), "--port", str(missing), "--file", str(tmp_path / "usage-lcd.json")]
+    log = tmp_path / "usage-lcd" / "bridge.log"
+    running = "%s: cannot open" % missing  # logged from the bridge's loop, after it took the lock
+    procs = []
+
+    def start():
+        procs.append(subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        return procs[-1]
+
+    try:
+        first = start()
+        wait_for_log(log, running)
+        second = subprocess.run(cmd, env=env, capture_output=True, encoding="utf-8", timeout=10)
+        assert second.returncode == 3 and "another bridge is already running" in second.stderr, second.stderr
+        assert first.poll() is None
+
+        first.send_signal(signal.SIGTERM)
+        assert first.wait(5) == 0
+        wait_for_log(log, "INFO stopped")
+
+        third = start()
+        wait_for_log(log, running, count=2)
+        third.send_signal(signal.SIGTERM)
+        assert third.wait(5) == 0
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()

@@ -11,6 +11,7 @@ import logging.handlers
 import math
 import os
 import re
+import signal
 import socket
 import sys
 import time
@@ -22,6 +23,11 @@ try:
     from serial.tools import list_ports as _list_ports
 except ImportError:  # --dry-run and --version work without it
     serial = None
+try:
+    import fcntl
+    import termios
+except ImportError:  # Windows
+    fcntl = termios = None
 
 VERSION = "0.1.0"
 BAUD = 9600
@@ -29,6 +35,9 @@ HELLO = "R|usage-lcd|"
 # Probe order: Arduino, Arduino, CH340, FTDI, CP210x, then everything else.
 VENDORS = {0x2341: "Arduino", 0x2A03: "Arduino", 0x1A86: "CH340", 0x0403: "FTDI", 0x10C4: "CP210x"}
 KNOWN_VIDS = list(VENDORS)
+# macOS names USB serial ports like this (original boards, CH340 with Apple's or WCH's driver,
+# FTDI, CP210x); they are probed before all others.
+MAC_USB_SERIAL = ("/dev/cu.usbmodem", "/dev/cu.usbserial", "/dev/cu.wchusbserial", "/dev/cu.SLAB_USBtoUART")
 POLL_S = 1.0
 HEARTBEAT_S = 10.0
 RETRY_S = 5.0
@@ -153,7 +162,26 @@ def snapshot_to_line(snapshot, now):
 # --- 2. Serial link ---------------------------------------------------------
 
 def open_serial(name):
-    return serial.Serial(name, BAUD, timeout=0.1, write_timeout=2, exclusive=True)
+    ser = serial.Serial(name, BAUD, timeout=0.1, write_timeout=2, exclusive=True)
+    try:
+        lock_tty(ser)
+    except OSError:
+        _close(ser)
+        raise
+    return ser
+
+
+def lock_tty(ser):
+    """POSIX: exclusive=True only takes a flock, which the Arduino IDE's upload and Serial Monitor
+    ignore. With TIOCEXCL their open fails with "Resource busy" instead of sharing the board.
+    (Windows opens a COM port exclusively anyway.)"""
+    if termios is None or not hasattr(termios, "TIOCEXCL"):
+        return
+    try:
+        fcntl.ioctl(ser.fileno(), termios.TIOCEXCL)
+    except OSError as e:
+        if e.errno not in (errno.ENOTTY, errno.EINVAL):  # not a terminal: nothing to lock
+            raise
 
 
 def list_serial_ports():
@@ -162,7 +190,8 @@ def list_serial_ports():
 
 def port_rank(p, preferred=None):
     vid = getattr(p, "vid", None)
-    return (p.device != preferred, KNOWN_VIDS.index(vid) if vid in KNOWN_VIDS else len(KNOWN_VIDS))
+    return (p.device != preferred, not p.device.startswith(MAC_USB_SERIAL),
+            KNOWN_VIDS.index(vid) if vid in KNOWN_VIDS else len(KNOWN_VIDS))
 
 
 def is_bluetooth(p):
@@ -170,10 +199,20 @@ def is_bluetooth(p):
     return (getattr(p, "hwid", None) or "").upper().startswith("BTHENUM")
 
 
+def skip_port(p):
+    """Ports never probed: Windows' Bluetooth links; on macOS the /dev/tty.* twin of each port
+    (its open can wait for a carrier) and every /dev/cu.* port that is not on USB:
+    Bluetooth-Incoming-Port, debug-console and each paired Bluetooth device."""
+    name = p.device
+    if is_bluetooth(p) or name.startswith("/dev/tty."):
+        return True
+    return name.startswith("/dev/cu.") and getattr(p, "vid", None) is None and not name.startswith(MAC_USB_SERIAL)
+
+
 def ordered_ports(ports, preferred=None):
-    """Device names: the last good port, then known vendor ids in order, then the rest.
-    Bluetooth links are never probed."""
-    return [p.device for p in sorted(ports, key=lambda p: port_rank(p, preferred)) if not is_bluetooth(p)]
+    """Device names: the last good port, then macOS USB serial names, then known vendor ids in
+    order, then the rest. Ports skip_port() names are never probed."""
+    return [p.device for p in sorted(ports, key=lambda p: port_rank(p, preferred)) if not skip_port(p)]
 
 
 def _close(ser):
@@ -282,7 +321,8 @@ class Bridge:
         except OSError as e:
             # Windows says "PermissionError(13, 'Access is denied.'...)" in the user's language
             busy = isinstance(e, PermissionError) or "PermissionError" in str(e)
-            if busy or e.errno in (errno.EACCES, errno.EBUSY):
+            # EAGAIN: another program holds the port's flock (pyserial's exclusive=True)
+            if busy or e.errno in (errno.EACCES, errno.EBUSY, errno.EAGAIN):
                 self._report("%s is busy or access is denied: close the Arduino IDE Serial Monitor "
                              "or any other program using it (%s)" % (name, e))
             else:
@@ -349,16 +389,18 @@ def acquire_lock(port):
     return s
 
 
-def log_file(env):
+def log_file(env, platform=None):
     if env.get("LOCALAPPDATA"):
         return os.path.join(env["LOCALAPPDATA"], "usage-lcd", "bridge.log")
+    if (platform or sys.platform) == "darwin":  # where Console.app shows a user's logs
+        return os.path.join(os.path.expanduser("~"), "Library", "Logs", "usage-lcd", "bridge.log")
     return os.path.join(os.path.expanduser("~"), ".cache", "usage-lcd", "bridge.log")
 
 
-def setup_logging(verbose, path):
+def setup_logging(verbose, path, console=True):
     log.setLevel(logging.DEBUG if verbose else logging.INFO)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    handlers = [logging.StreamHandler()] if sys.stderr is not None else []  # pythonw has no console
+    handlers = [logging.StreamHandler()] if console and sys.stderr is not None else []  # pythonw has no console
     error = None
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -374,8 +416,15 @@ def setup_logging(verbose, path):
 
 
 def pip_hint():
+    if sys.platform == "darwin":  # Homebrew's Python refuses pip installs outside a venv (PEP 668)
+        return ("pyserial is not installed. Double-click bridge/macos/start-bridge.command: "
+                "it sets up a Python environment with pyserial.")
     req = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
     return 'pyserial is not installed. Run: "%s" -m pip install -r "%s"' % (sys.executable, req)
+
+
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
 
 
 def main(argv=None):
@@ -388,6 +437,8 @@ def main(argv=None):
     p.add_argument("--list", action="store_true", help="list serial ports and exit")
     p.add_argument("--dry-run", action="store_true", help="print the lines instead of opening a port")
     p.add_argument("--verbose", "-v", action="store_true", help="log every line sent and received")
+    p.add_argument("--no-console-log", action="store_true",
+                   help="log to the log file only (the macOS autostart: launchd keeps the console output apart)")
     p.add_argument("--version", action="version", version="usage_lcd_bridge " + VERSION)
     args = p.parse_args(argv)
 
@@ -403,7 +454,7 @@ def main(argv=None):
             print("No serial ports found.")
         return 0
 
-    setup_logging(args.verbose, log_file(os.environ))
+    setup_logging(args.verbose, log_file(os.environ), console=not args.no_console_log)
     path = snapshot_path(os.environ, args.file)
     if not path:
         log.error("cannot tell where the snapshot file is: set USAGE_LCD_FILE or use --file")
@@ -418,11 +469,14 @@ def main(argv=None):
             lock = acquire_lock(lock_port)
         except OSError as e:
             # The OS error tells "in use" apart from a port Windows reserved (e.g. for Hyper-V).
-            log.info("another bridge is already running: 127.0.0.1:%d is taken (%s). stop-bridge.cmd stops it; "
-                     "if none is running, set USAGE_LCD_LOCK_PORT to another port. Exiting.", lock_port, e)
+            stopper = "bridge/macos/stop-bridge.command" if sys.platform == "darwin" else "stop-bridge.cmd"
+            log.info("another bridge is already running: 127.0.0.1:%d is taken (%s). %s stops it; "
+                     "if none is running, set USAGE_LCD_LOCK_PORT to another port. Exiting.", lock_port, e, stopper)
             return 3
     log.info("usage_lcd_bridge %s reading %s", VERSION, path)
     bridge = Bridge(SnapshotReader(path), port=args.port, dry_run=args.dry_run)
+    if sys.platform != "win32":  # launchctl bootout and stop-bridge.command send SIGTERM: stop as on Ctrl+C
+        signal.signal(signal.SIGTERM, _interrupt)
     try:
         bridge.run()
     except KeyboardInterrupt:

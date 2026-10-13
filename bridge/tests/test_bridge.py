@@ -1,3 +1,4 @@
+import errno
 import json
 import logging
 import logging.handlers
@@ -127,6 +128,13 @@ def test_path_resolution_order():
     assert b.snapshot_path(env) == "/c/Users/Some Name/.claude/usage-lcd.json"
     assert b.snapshot_path({"CLAUDE_CONFIG_DIR": "/home/u/cfg/"}) == "/home/u/cfg/usage-lcd.json"
     assert b.snapshot_path({}) is None
+
+
+def test_path_on_macos_is_home_only():
+    # The desktop app and launchd give a Mac process HOME, never USERPROFILE.
+    assert b.snapshot_path({"HOME": "/Users/Some Name"}) == "/Users/Some Name/.claude/usage-lcd.json"
+    assert b.snapshot_path({"HOME": "/Users/Some Name/", "USERPROFILE": ""}) == \
+        "/Users/Some Name/.claude/usage-lcd.json"
 
 
 # --- tolerant reading --------------------------------------------------------
@@ -349,6 +357,21 @@ def test_busy_port_then_free(caplog):
     assert bridge.link is fake and opened == ["COM3", "COM3"]
 
 
+@pytest.mark.parametrize("error", [
+    # pyserial's flock: another program opened it with exclusive=True
+    serial.SerialException(errno.EAGAIN, "Could not exclusively lock port /dev/cu.usbserial-110: "
+                                         "[Errno 35] Resource temporarily unavailable"),
+    # TIOCEXCL: the Arduino IDE's Serial Monitor holds it
+    serial.SerialException(errno.EBUSY, "could not open port /dev/cu.usbserial-110: "
+                                        "[Errno 16] Resource busy: '/dev/cu.usbserial-110'"),
+])
+def test_busy_port_on_macos(error, caplog):
+    clock = Clock()
+    bridge, _ = make_bridge(clock, {"/dev/cu.usbserial-110": [error]}, port="/dev/cu.usbserial-110")
+    bridge.step()
+    assert bridge.link is None and "/dev/cu.usbserial-110 is busy" in caplog.text
+
+
 def test_vanished_port_logged():
     clock = Clock()
     gone = serial.SerialException("could not open port 'COM3': FileNotFoundError(2, 'not found', None, 2)")
@@ -479,6 +502,119 @@ def test_port_order_skips_bluetooth():
     assert b.ordered_ports(infos) == ["COM5", "COM4"]
 
 
+def mac_port(device, vid=None):
+    """A port as pyserial lists it on macOS: USB ones carry ids, the rest hwid "n/a"."""
+    hwid = "USB VID:PID=%04X:7523 LOCATION=0-1.1" % vid if vid is not None else "n/a"
+    return SimpleNamespace(device=device, vid=vid, hwid=hwid)
+
+
+MAC_PORTS = [
+    mac_port("/dev/cu.Bluetooth-Incoming-Port"),
+    mac_port("/dev/cu.RedmiBuds6Active"),  # a paired Bluetooth device
+    mac_port("/dev/cu.debug-console"),
+    mac_port("/dev/cu.SomeUsbGadget", 0x1234),  # on USB, but no USB-serial name and an unknown vendor
+    mac_port("/dev/tty.usbserial-110", 0x1A86),  # the dial-in twin; pyserial lists only cu
+    mac_port("/dev/cu.wchusbserial120"),  # a vendor driver that gives no USB ids
+    mac_port("/dev/cu.SLAB_USBtoUART", 0x10C4),
+    mac_port("/dev/cu.usbserial-A10K", 0x0403),
+    mac_port("/dev/cu.usbserial-110", 0x1A86),  # CH340 clone, Apple's driver
+    mac_port("/dev/cu.usbmodem14101", 0x2341),  # original UNO or Mega
+]
+
+
+def test_port_order_on_macos():
+    assert b.ordered_ports(MAC_PORTS) == [
+        "/dev/cu.usbmodem14101", "/dev/cu.usbserial-110", "/dev/cu.usbserial-A10K", "/dev/cu.SLAB_USBtoUART",
+        "/dev/cu.wchusbserial120", "/dev/cu.SomeUsbGadget"]
+    assert b.ordered_ports(MAC_PORTS, preferred="/dev/cu.SomeUsbGadget")[0] == "/dev/cu.SomeUsbGadget"
+
+
+@pytest.mark.parametrize("device", ["/dev/cu.Bluetooth-Incoming-Port", "/dev/cu.RedmiBuds6Active",
+                                    "/dev/cu.debug-console", "/dev/tty.usbserial-110", "/dev/tty.usbmodem14101",
+                                    "/dev/tty.Bluetooth-Incoming-Port"])
+def test_macos_ports_never_probed(device):
+    assert b.skip_port(mac_port(device, 0x1A86 if "usb" in device else None))
+
+
+@pytest.mark.parametrize("device", ["COM3", "/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyS0"])
+def test_other_systems_ports_are_not_skipped_by_the_macos_rules(device):
+    assert not b.skip_port(SimpleNamespace(device=device, vid=None))
+
+
+def test_macos_bluetooth_ports_never_opened(caplog):
+    clock = Clock()
+    ports = {name: [FakeSerial(clock, hello_at=1.0)] for name in
+             ("/dev/cu.Bluetooth-Incoming-Port", "/dev/cu.debug-console", "/dev/cu.RedmiBuds6Active")}
+    bridge, opened = make_bridge(clock, ports)
+    bridge.step()
+    assert opened == [] and bridge.link is None and "no serial ports found" in caplog.text
+
+    board = FakeSerial(clock, hello_at=1.0)
+    ports["/dev/cu.usbserial-110"] = [board]
+    clock.advance(5)
+    bridge, opened = make_bridge(clock, ports, vids={"/dev/cu.usbserial-110": 0x1A86})
+    bridge.step()
+    assert opened == ["/dev/cu.usbserial-110"] and bridge.link is board
+
+
+def test_port_option_is_never_filtered():
+    clock = Clock()
+    fake = FakeSerial(clock, hello_at=1.0)
+    bridge, opened = make_bridge(clock, {"/dev/tty.usbserial-110": [fake]}, port="/dev/tty.usbserial-110",
+                                 list_ports=lambda: pytest.fail("--port must not list ports"))
+    bridge.step()
+    assert opened == ["/dev/tty.usbserial-110"] and bridge.link is fake
+
+
+class FakePort:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def fileno(self):
+        return 7
+
+    def close(self):
+        self.calls.append("close")
+
+
+def fake_open(monkeypatch, ioctl):
+    calls = []
+    monkeypatch.setattr(b.serial, "Serial", lambda *a, **k: calls.append(("open", k["exclusive"])) or FakePort(calls))
+    monkeypatch.setattr(b.fcntl, "ioctl", lambda fd, request: calls.append(("ioctl", fd, request)) or ioctl())
+    return calls
+
+
+posix_only = pytest.mark.skipif(b.termios is None, reason="POSIX only: Windows opens COM ports exclusively")
+
+
+@posix_only
+def test_open_takes_the_tty_exclusively(monkeypatch):
+    # flock alone does not stop the Arduino IDE's upload or Serial Monitor; TIOCEXCL does.
+    calls = fake_open(monkeypatch, lambda: None)
+    port = b.open_serial("/dev/cu.usbserial-110")
+    assert isinstance(port, FakePort) and calls == [("open", True), ("ioctl", 7, b.termios.TIOCEXCL)]
+
+
+@posix_only
+def test_open_ignores_tiocexcl_on_a_non_terminal(monkeypatch):
+    def ioctl():
+        raise OSError(errno.ENOTTY, "Inappropriate ioctl for device")
+
+    calls = fake_open(monkeypatch, ioctl)
+    assert isinstance(b.open_serial("/dev/cu.usbserial-110"), FakePort) and "close" not in calls
+
+
+@posix_only
+def test_open_closes_the_port_when_tiocexcl_fails(monkeypatch):
+    def ioctl():
+        raise OSError(errno.EIO, "Input/output error")
+
+    calls = fake_open(monkeypatch, ioctl)
+    with pytest.raises(OSError):
+        b.open_serial("/dev/cu.usbserial-110")
+    assert calls[-1] == "close"
+
+
 def test_line_buffer():
     buf = b.LineBuffer()
     assert buf.feed(b"R|usage-") == []
@@ -528,15 +664,47 @@ def test_lock_socket_is_exclusive_on_windows(monkeypatch):
     assert calls == [-5, ("127.0.0.1", 47631)]  # and never SO_REUSEADDR
 
 
-def test_second_bridge_exits_3(tmp_path, monkeypatch, caplog, own_handlers):
+@pytest.mark.parametrize("platform, stopper", [("win32", " stop-bridge.cmd stops it;"),
+                                               ("darwin", " bridge/macos/stop-bridge.command stops it;")])
+def test_second_bridge_exits_3(platform, stopper, tmp_path, monkeypatch, caplog, own_handlers):
     first = b.acquire_lock(0)
     monkeypatch.setenv("USAGE_LCD_LOCK_PORT", str(first.getsockname()[1]))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", platform)
     try:
         assert b.main(["--file", str(tmp_path / "usage-lcd.json")]) == 3
     finally:
         first.close()
-    assert "another bridge is already running" in caplog.text
+    assert "another bridge is already running" in caplog.text and stopper in caplog.text
+
+
+def test_no_console_log_writes_the_file_only(tmp_path, monkeypatch, own_handlers):
+    # The macOS autostart: launchd keeps the console output in a file of its own.
+    first = b.acquire_lock(0)
+    monkeypatch.setenv("USAGE_LCD_LOCK_PORT", str(first.getsockname()[1]))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    try:
+        assert b.main(["--no-console-log", "--file", str(tmp_path / "usage-lcd.json")]) == 3
+    finally:
+        first.close()
+    assert [type(h) for h in set(b.log.handlers)] == [logging.handlers.RotatingFileHandler]
+    assert "another bridge is already running" in (tmp_path / "usage-lcd" / "bridge.log").read_text(encoding="utf-8")
+
+
+def test_log_file_per_system(tmp_path):
+    home = os.path.expanduser("~")
+    assert b.log_file({}, "darwin") == os.path.join(home, "Library", "Logs", "usage-lcd", "bridge.log")
+    assert b.log_file({}, "linux") == os.path.join(home, ".cache", "usage-lcd", "bridge.log")
+    for platform in ("win32", "darwin", "linux"):
+        assert b.log_file({"LOCALAPPDATA": str(tmp_path)}, platform) == \
+            os.path.join(str(tmp_path), "usage-lcd", "bridge.log")
+
+
+@pytest.mark.parametrize("platform, hint", [("win32", "-m pip install -r"), ("linux", "-m pip install -r"),
+                                            ("darwin", "bridge/macos/start-bridge.command")])
+def test_pip_hint(platform, hint, monkeypatch):
+    monkeypatch.setattr(sys, "platform", platform)
+    assert hint in b.pip_hint()
 
 
 def test_no_console_like_pythonw(tmp_path, monkeypatch, own_handlers):

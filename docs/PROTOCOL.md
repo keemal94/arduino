@@ -1,7 +1,7 @@
 # Claude usage LCD: the contract between the three parts
 
 ```
-Claude Code (desktop app or CLI, on the Windows PC)
+Claude Code (desktop app or CLI, on the Windows PC or Mac)
   └─ mod "usage-lcd"  ──writes──▶  usage-lcd.json   (1. snapshot file)
                                         │ polled
                                    bridge (Python)  ──USB serial──▶  Arduino UNO/Mega + 16x2 I2C LCD
@@ -21,7 +21,8 @@ Both the mod and the bridge resolve the path the same way, first match wins:
 1. `USAGE_LCD_FILE` environment variable: the full path of the file.
 2. `CLAUDE_CONFIG_DIR` environment variable: `<CLAUDE_CONFIG_DIR>/usage-lcd.json`.
 3. `USERPROFILE` environment variable (Windows): `<USERPROFILE>/.claude/usage-lcd.json`.
-4. `HOME` environment variable: `<HOME>/.claude/usage-lcd.json`.
+4. `HOME` environment variable (macOS, Linux): `<HOME>/.claude/usage-lcd.json`. On macOS the
+   desktop app and launchd set only `HOME`, so the file is `~/.claude/usage-lcd.json`.
 
 The bridge also accepts `--file <path>`, which overrides all of the above.
 A variable that is set but empty counts as unset. When joining, use `\` if
@@ -100,12 +101,21 @@ For each of `five_hour` and `seven_day`, at time `now`:
 
 ### Bridge: finding the board
 
-- `--port COMx` uses that port only.
+- `--port COMx` (macOS: `--port /dev/cu.usbserial-110`) uses that port only.
 - Otherwise it probes serial ports, those with a known Arduino or USB-serial
   vendor id first (`0x2341`, `0x2A03` Arduino; `0x1A86` CH340; `0x0403` FTDI;
   `0x10C4` CP210x), then the rest, skipping Windows' serial-over-Bluetooth
   links (hardware id `BTHENUM…`), whose open can block. Probing a port = open it, wait up to 4 s
   for `R|usage-lcd|`, and if nothing came send `?` and wait 1.5 s more.
+- On macOS it probes `/dev/cu.*` ports only, never their `/dev/tty.*` twins (whose open can
+  wait for a carrier), and never a port that is not on USB: `/dev/cu.Bluetooth-Incoming-Port`,
+  `/dev/cu.debug-console` and the port of each paired Bluetooth device. The macOS USB serial
+  names come first, before the vendor id order: `/dev/cu.usbmodem*` (original UNO and Mega),
+  `/dev/cu.usbserial*` (CH340 with Apple's driver, FTDI), `/dev/cu.wchusbserial*` (CH340 with
+  WCH's driver), `/dev/cu.SLAB_USBtoUART*` (CP210x).
+- On macOS and Linux the bridge also sets `TIOCEXCL` on the open port, so another program
+  (the Arduino IDE's upload or Serial Monitor) gets "Resource busy" instead of sharing it, as
+  on Windows.
 - A port that is busy (another program holds it, e.g. the Arduino IDE's
   Serial Monitor or an upload) or vanishes (USB unplugged) is not fatal: the
   bridge logs it and tries again every 5 s.
